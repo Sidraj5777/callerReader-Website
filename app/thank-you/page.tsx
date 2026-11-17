@@ -1,9 +1,18 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { getMySubscription, type MySubscription } from "@/lib/billing";
 
 export default function ThankYouPage() {
   const router = useRouter();
+  const [me, setMe] = useState<MySubscription | null>(null);
+
+  useEffect(() => {
+    getMySubscription().then((r) => {
+      if (r.ok) setMe(r.data);
+    });
+  }, []);
 
   return (
     <div className="relative min-h-screen overflow-x-hidden">
@@ -41,9 +50,29 @@ export default function ThankYouPage() {
             </p>
             <div className="h-px bg-gradient-to-r from-transparent via-blue-300 to-transparent my-6" />
             <p className="text-gray-600 text-lg">
-              We are now monitoring recalls for you and will email you immediately when we identify relevant recalls.
+              {me?.premium
+                ? "We are now monitoring recalls for you and will email you as soon as we detect one that matches your household."
+                : "We are now monitoring recalls for you. On the Free plan you get one email a week with every recall that matches your household."}
             </p>
+            {me && !me.premium && (
+              <p className="text-gray-600 mt-3">
+                Want to hear about recalls the moment we detect them, with no ads?{" "}
+                <button
+                  type="button"
+                  onClick={() => router.push("/subscribe")}
+                  className="font-semibold text-blue-700 underline underline-offset-4"
+                >
+                  See Premium
+                </button>
+              </p>
+            )}
             <div className="mt-8 flex flex-col sm:flex-row gap-4 justify-center">
+              <button
+                onClick={() => router.push('/account')}
+                className="px-6 py-3 rounded-full bg-white text-blue-700 font-semibold border border-blue-200 hover:bg-blue-50 transition"
+              >
+                My account
+              </button>
               <button
                 onClick={() => router.push('/')}
                 className="px-6 py-3 rounded-full bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-semibold shadow-md hover:shadow-lg transform hover:-translate-y-0.5 transition duration-200"

@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from "react";
 import { loginUser, saveToken } from "@/lib/auth";
+import PasswordInput from "./PasswordInput";
 
 export default function LoginForm({
   prefillEmail,
@@ -52,12 +53,12 @@ export default function LoginForm({
         onChange={(e) => setEmail(e.target.value)}
         className="w-full px-4 py-3 rounded-xl bg-white/60 border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none transition"
       />
-      <input
-        type="password"
+      <PasswordInput
         placeholder="Password"
         value={password}
         onChange={(e) => setPassword(e.target.value)}
         className="w-full px-4 py-3 rounded-xl bg-white/60 border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none transition"
+        autoComplete="current-password"
       />
       {error && <p className="text-red-500 text-sm text-center">{error}</p>}
       <button

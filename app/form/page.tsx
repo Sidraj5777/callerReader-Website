@@ -4,10 +4,85 @@ import { useState, useEffect, Suspense } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   getToken,
+  clearToken,
   getMyProfile,
   updateMyProfile,
   type FetchedProfile,
 } from "@/lib/auth";
+
+// ========== GENDER (mirrors backend enum com.recallradar.backend.dto.Gender) ==========
+// State always holds the backend enum value ("MALE", "NON_BINARY", ...).
+// The UI only shows a friendly label; anything coming in or going out is
+// normalized to uppercase so it always matches the enum.
+const GENDER_OPTIONS = [
+  "MALE",
+  "FEMALE",
+  "TRANSGENDER",
+  "NON_BINARY",
+  "PREFER_NOT_TO_ANSWER",
+];
+
+// "PREFER_NOT_TO_ANSWER" -> "Prefer not to answer", "NON_BINARY" -> "Non binary"
+const toGenderLabel = (value: string) => {
+  const s = value.toLowerCase().replace(/_/g, " ");
+  return s.charAt(0).toUpperCase() + s.slice(1);
+};
+
+// "Non-binary" / "non binary" / "male" -> "NON_BINARY" / "MALE"
+const toGenderEnum = (value?: string | null) =>
+  (value ?? "").trim().toUpperCase().replace(/[\s-]+/g, "_");
+
+// Resolve a saved gender into one of GENDER_OPTIONS. "Other" was removed as a
+// choice, so an old OTHER / free-text value comes back empty and the user is
+// asked to pick again.
+const resolveGender = (value?: string | null): string => {
+  if (!value || !value.trim()) return "";
+  const asEnum = toGenderEnum(value);
+  return GENDER_OPTIONS.includes(asEnum) ? asEnum : "";
+};
+
+// Child gender uses the same backend enum as the adult question.
+const CHILD_GENDER_OPTIONS = GENDER_OPTIONS;
+
+type ChildForm = {
+  age: string;
+  gender: string;
+  allergies: string[]; // labels, e.g. ["Peanut", "Other"]
+  allergiesOther: string; // free text when "Other" is ticked
+};
+
+const emptyChild = (): ChildForm => ({
+  age: "",
+  gender: "",
+  allergies: [],
+  allergiesOther: "",
+});
+
+// /me returns a few fields that FetchedProfile in lib/auth.ts doesn't declare yet.
+type MeProfile = FetchedProfile & {
+  externalRefId?: string | null;
+  active?: boolean | null;
+  gender?: string | null;
+  medications?: string[] | null;
+  medicalDevices?: string[] | null;
+};
+
+// A brand-new account still gets a /me response (name + email), but none of
+// the form fields are filled. Only treat it as an existing registration when
+// real profile data is present.
+// Where inactive accounts are sent to choose a plan.
+const SUBSCRIBE_PATH = "/subscribe";
+
+const hasSavedProfileData = (p: MeProfile | null): boolean =>
+  !!p &&
+  !!(
+    p.city ||
+    p.stateCode ||
+    p.zipCode ||
+    p.age != null ||
+    p.gender ||
+    (p.categories && p.categories.length > 0)
+  );
 
 // ========== STABLE HELPER COMPONENTS ==========
 const CheckboxGroup = ({
@@ -18,10 +93,14 @@ const CheckboxGroup = ({
   otherValue,
   setOtherValue,
   otherLabel = "Other",
+  required = false,
+  error,
+  id,
 }: any) => (
-  <div className="mb-6">
+  <div id={id} className="mb-6 scroll-mt-28">
     <label className="block text-lg font-semibold text-gray-800 mb-3">
       {label}
+      {required && <span className="text-red-500"> *</span>}
     </label>
     <div className="flex flex-wrap gap-3">
       {options.map((opt: string) => (
@@ -48,33 +127,47 @@ const CheckboxGroup = ({
         className="mt-3 w-full px-4 py-2 rounded-xl bg-white/60 border border-gray-200 focus:border-blue-500 outline-none"
       />
     )}
+    {error && <p className="text-red-500 text-sm mt-2">{error}</p>}
   </div>
 );
 
-const RadioGroup = ({ options, value, onChange, label }: any) => (
+// Section error text (used for vehicle / people blocks that aren't CheckboxGroups)
+const SectionError = ({ message }: { message?: string }) =>
+  message ? <p className="text-red-500 text-sm mt-1 mb-3">{message}</p> : null;
+
+const RadioGroup = ({
+  options,
+  value,
+  onChange,
+  label,
+  name,
+  getLabel = (opt: string) => opt,
+}: any) => (
   <div className="mb-6">
     <label className="block text-lg font-semibold text-gray-800 mb-3">
       {label}
     </label>
     <div className="flex flex-wrap gap-4">
       {options.map((opt: string) => (
-        <label key={opt} className="flex items-center gap-2">
+        <label key={opt} className="flex items-center gap-2 cursor-pointer">
           <input
             type="radio"
-            name={label}
+            name={name || label}
             value={opt}
             checked={value === opt}
             onChange={() => onChange(opt)}
             className="w-4 h-4 text-blue-600"
           />
-          <span>{opt}</span>
+          <span>{getLabel(opt)}</span>
         </label>
       ))}
     </div>
   </div>
 );
 
-// Helper component for a single child entry
+// Helper component for a single child entry.
+// Stateless: everything lives in the parent's childrenList, so removing a
+// child never shifts typed text into the wrong card.
 const ChildEntry = ({
   child,
   index,
@@ -82,20 +175,37 @@ const ChildEntry = ({
   removeChild,
   canRemove,
   allergyOptions,
-}: any) => {
-  const [allergyOther, setAllergyOther] = useState(child.allergiesOther || "");
+  showErrors,
+}: {
+  child: ChildForm;
+  index: number;
+  updateChild: (index: number, updates: Partial<ChildForm>) => void;
+  removeChild: (index: number) => void;
+  canRemove: boolean;
+  allergyOptions: string[];
+  showErrors: boolean;
+}) => {
+  const noAllergies = child.allergies.length === 0;
 
-  const handleAllergyChange = (value: string) => {
+  const toggleAllergy = (opt: string) => {
+    const next = child.allergies.includes(opt)
+      ? child.allergies.filter((a) => a !== opt)
+      : [...child.allergies, opt];
     updateChild(index, {
-      allergies: value,
-      allergiesOther: value === "Other" ? allergyOther : "",
+      allergies: next,
+      allergiesOther: next.includes("Other") ? child.allergiesOther : "",
     });
   };
 
-  const handleOtherTextChange = (text: string) => {
-    setAllergyOther(text);
-    updateChild(index, { allergies: "Other", allergiesOther: text });
-  };
+  const ageMissing = showErrors && !child.age.trim();
+  const genderMissing = showErrors && !!child.age.trim() && !child.gender;
+
+  const chip = (checked: boolean) =>
+    `flex items-center gap-2 px-3 py-1.5 rounded-full border text-sm cursor-pointer transition ${
+      checked
+        ? "bg-blue-600 border-blue-600 text-white"
+        : "bg-white/60 border-gray-200 text-gray-700 hover:bg-white"
+    }`;
 
   return (
     <div className="p-4 bg-white/40 rounded-xl border border-gray-200 mb-4">
@@ -111,50 +221,102 @@ const ChildEntry = ({
           </button>
         )}
       </div>
+
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-2">
         <div>
-          <label className="block text-gray-600 text-sm mb-1">
-            Age (required) *
+          <label
+            htmlFor={`child-${index}-age`}
+            className="block text-gray-600 text-sm mb-1"
+          >
+            Age <span className="text-red-500">*</span>
           </label>
           <input
+            id={`child-${index}-age`}
             type="number"
+            min={0}
+            max={25}
             value={child.age}
             onChange={(e) => updateChild(index, { age: e.target.value })}
-            className="w-full px-3 py-2 rounded-lg bg-white/60 border border-gray-200 focus:border-blue-500 outline-none"
+            className={`w-full px-3 py-2 rounded-lg bg-white/60 border outline-none focus:border-blue-500 ${
+              ageMissing ? "border-red-400" : "border-gray-200"
+            }`}
             placeholder="e.g., 5"
           />
         </div>
         <div>
-          <label className="block text-gray-600 text-sm mb-1">
-            Allergies (optional)
+          <label
+            htmlFor={`child-${index}-gender`}
+            className="block text-gray-600 text-sm mb-1"
+          >
+            Gender <span className="text-red-500">*</span>
           </label>
           <select
-            value={child.allergies || ""}
-            onChange={(e) => handleAllergyChange(e.target.value)}
-            className="w-full px-3 py-2 rounded-lg bg-white/60 border border-gray-200 focus:border-blue-500 outline-none"
+            id={`child-${index}-gender`}
+            value={child.gender}
+            onChange={(e) => updateChild(index, { gender: e.target.value })}
+            className={`w-full px-3 py-2 rounded-lg bg-white/60 border outline-none focus:border-blue-500 ${
+              genderMissing ? "border-red-400" : "border-gray-200"
+            }`}
           >
-            <option value="">No allergies</option>
-            {allergyOptions.map(
-              (
-                opt: string, // Fixed: added :string type
-              ) => (
-                <option key={opt} value={opt}>
-                  {opt}
-                </option>
-              ),
-            )}
+            <option value="">Select gender</option>
+            {CHILD_GENDER_OPTIONS.map((g) => (
+              <option key={g} value={g}>
+                {toGenderLabel(g)}
+              </option>
+            ))}
           </select>
-          {child.allergies === "Other" && (
-            <input
-              type="text"
-              value={allergyOther}
-              onChange={(e) => handleOtherTextChange(e.target.value)}
-              placeholder="Please specify allergy"
-              className="mt-2 w-full px-3 py-2 rounded-lg bg-white/60 border border-gray-200 focus:border-blue-500 outline-none"
-            />
+          {genderMissing && (
+            <p className="text-red-500 text-xs mt-1">Please select a gender.</p>
           )}
         </div>
       </div>
+
+      <fieldset className="mt-4 border-0 p-0 m-0 min-w-0">
+        <legend className="block text-gray-600 text-sm mb-2">
+          Allergies (optional, select all that apply)
+        </legend>
+        <div className="flex flex-wrap gap-2">
+          <label className={chip(noAllergies)}>
+            <input
+              type="checkbox"
+              className="sr-only"
+              checked={noAllergies}
+              onChange={() =>
+                updateChild(index, { allergies: [], allergiesOther: "" })
+              }
+            />
+            {noAllergies && <span aria-hidden="true">✓</span>}
+            No allergies
+          </label>
+          {allergyOptions.map((opt) => {
+            const checked = child.allergies.includes(opt);
+            return (
+              <label key={opt} className={chip(checked)}>
+                <input
+                  type="checkbox"
+                  className="sr-only"
+                  checked={checked}
+                  onChange={() => toggleAllergy(opt)}
+                />
+                {checked && <span aria-hidden="true">✓</span>}
+                {opt}
+              </label>
+            );
+          })}
+        </div>
+        {child.allergies.includes("Other") && (
+          <input
+            type="text"
+            value={child.allergiesOther}
+            onChange={(e) =>
+              updateChild(index, { allergiesOther: e.target.value })
+            }
+            placeholder="Other allergies, separated by commas"
+            aria-label={`Child ${index + 1} other allergies`}
+            className="mt-2 w-full px-3 py-2 rounded-lg bg-white/60 border border-gray-200 focus:border-blue-500 outline-none"
+          />
+        )}
+      </fieldset>
     </div>
   );
 };
@@ -162,24 +324,32 @@ const ChildEntry = ({
 function FormPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  // Empty by default — the greeting falls back to "there" in the JSX only,
+  // so a placeholder name is never sent to the backend.
   const [firstName, setFirstName] = useState(
-    searchParams.get("firstName") || "there",
+    searchParams.get("firstName") || "",
   );
   const [lastName, setLastName] = useState(
-    searchParams.get("lastName") || "there",
+    searchParams.get("lastName") || "",
+  );
+  const [profileEmail, setProfileEmail] = useState(
+    searchParams.get("email") || "",
   );
   const [loadingProfile, setLoadingProfile] = useState(false);
-  // getToken() reads localStorage, which doesn't exist on the server. Calling
-  // it directly in the JSX below made the server always render "Welcome" and
-  // then the client immediately swap in "Welcome back" if a token existed —
-  // a hydration mismatch. Track it in state instead, set only after mount.
-  const [hasStoredToken, setHasStoredToken] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [externalRefId, setExternalRefId] = useState("");
+  // "new"    → first-time registration: /me has no saved data, user fills everything.
+  // "update" → returning user: /me has saved data, form is prefilled for editing.
+  const [mode, setMode] = useState<"new" | "update">("new");
+  const isUpdate = mode === "update";
+  // Inactive subscription + existing profile → form is read-only.
+  // First-time registration is never locked (mirrors backend updateUser()).
+  const [isLocked, setIsLocked] = useState(false);
 
   // ========== BASIC INFO ==========
   const [city, setCity] = useState("");
   const [state, setState] = useState("");
   const [gender, setGender] = useState("");
-  const [genderOther, setGenderOther] = useState("");
   const [age, setAge] = useState("");
   const [zipCode, setZipCode] = useState("");
 
@@ -247,109 +417,103 @@ function FormPageContent() {
 
   // ========== RECALL CATEGORIES ==========
   const recallCategories = [
+    "Furniture/Appliances",
+    "Automotive",
+    "Cleaning products",
+    "Clothes",
+    "Cosmetics",
     "Food (allergens, contaminations...)",
     "Home goods (cookware, candles, décor)",
-    "Toys/Kids products (car seats, strollers...)",
-    "Automotive",
-    "Pet products (food, toys...)",
-    "Clothes",
-    "Sports/Recreation",
-    "Furniture/Appliances",
-    "Cleaning products",
-    "Cosmetics",
-    "Tools",
     "Medications, supplements, medical devices",
+    "Pet products (food, toys...)",
+    "Sports/Recreation",
+    "Tools",
+    "Toys/Kids products (car seats, strollers...)",
   ];
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
 
   // ========== OPTION LISTS (mirror the ones rendered below, used to reverse
   // ========== the enum/uppercase values the backend stores back into labels)
-  const genderOptions = [
-    "Male",
-    "Female",
-    "Transgender",
-    "Non-binary",
-    "PREFER_NOT_TO_ANSWER",
-    "Other",
-  ];
   const foodAllergyOptions = [
-    "Milk",
     "Egg",
-    "Peanut",
-    "Tree nuts",
-    "Soy",
     "Fish",
+    "Milk",
+    "Peanut",
     "Shellfish",
+    "Soy",
+    "Tree nuts",
     "Other",
   ];
   const groceryStoreOptions = [
     "ACME",
-    "Publix",
-    "Albertson's",
-    "Sam's Club",
     "Amazon",
-    "Safeway",
+    "Albertson's",
     "BJ's",
-    "Save a Lot",
     "Costco",
-    "Target",
     "Dollar Tree",
-    "Trader Joe's",
     "Family Dollar",
-    "Vonns",
     "Food Lion",
-    "Walmart",
+    "Giant",
     "IGA",
-    "Wegmans",
     "Kroger",
+    "Publix",
+    "Safeway",
+    "Sam's Club",
+    "Save a Lot",
+    "Target",
+    "Trader Joe's",
+    "Vons",
+    "Walmart",
+    "Wegmans",
     "Whole Foods",
     "Other",
   ];
   const petOptions = [
-    "Dog",
-    "Cat",
     "Bird",
+    "Cat",
+    "Dog",
     "Fish",
-    "Rabbit",
     "Hamster",
+    "Rabbit",
     "Snake",
     "Other",
   ];
   const petShopOptions = [
+    "Amazon",
+    "Chewy",
+    "Petco",
     "Petsmart",
     "Pet Supermarket",
-    "Petco",
     "Pet Supplies Plus",
-    "Amazon",
     "Walmart",
     "Other",
   ];
   const sportsOptions = [
-    "Basketball",
     "Arts and Crafts",
+    "Basketball",
     "Baseball",
-    "Gardening",
     "Biking/Cycling",
-    "Woodworking",
-    "Soccer",
-    "Running",
-    "Football",
-    "Traveling",
-    "Fishing",
     "Cars",
-    "Snow sports (skiing, snowboarding)",
+    "Fishing",
+    "Football",
+    "Gardening",
     "Recreational vehicles (ATVs, 4 wheelers)",
+    "Running",
+    "Soccer",
+    "Snow sports (skiing, snowboarding)",
+    "Traveling",
+    "Woodworking",
     "Other",
   ];
   const healthConditionOptions = [
-    "Kidney disease",
-    "Heart disease",
-    "Obesity",
-    "Diabetes",
-    "Stroke",
-    "Dementia",
     "Cancer",
+    "Dementia",
+    "Diabetes",
+    "Heart disease",
+    "Kidney disease",
     "Lung disease",
+    "Obesity",
+    "Stroke",
     "Other",
   ];
 
@@ -407,10 +571,13 @@ function FormPageContent() {
   ): { selected: string[]; otherValue: string } {
     if (!values || values.length === 0) return { selected: [], otherValue: "" };
     const byUpper = new Map(knownOptions.map((o) => [o.toUpperCase(), o]));
+    // Older saves used a misspelled label; map it to the current option.
+    const aliases: Record<string, string> = { VONNS: "VONS" };
     const selected: string[] = [];
     const leftovers: string[] = [];
     for (const v of values) {
-      const match = byUpper.get(v.toUpperCase());
+      const upper = v.toUpperCase();
+      const match = byUpper.get(aliases[upper] ?? upper);
       if (match && match !== "Other") {
         if (!selected.includes(match)) selected.push(match);
       } else if (v) {
@@ -424,25 +591,11 @@ function FormPageContent() {
     return { selected, otherValue: "" };
   }
 
-  function matchSingle(
-    value: string | undefined,
-    knownOptions: string[],
-  ): { value: string; otherValue: string } {
-    if (!value) return { value: "", otherValue: "" };
-    const found = knownOptions.find(
-      (o) => o.toUpperCase() === value.toUpperCase(),
-    );
-    if (found && found !== "Other") return { value: found, otherValue: "" };
-    return knownOptions.includes("Other")
-      ? { value: "Other", otherValue: value }
-      : { value: "", otherValue: "" };
-  }
-
   // ========== CHILDREN ==========
   const [hasChildren, setHasChildren] = useState("");
-  const [childrenList, setChildrenList] = useState<
-    Array<{ age: string; allergies: string; allergiesOther: string }>
-  >([{ age: "", allergies: "", allergiesOther: "" }]);
+  const [childrenList, setChildrenList] = useState<ChildForm[]>([
+    emptyChild(),
+  ]);
 
   // ========== FOOD specific ==========
   const [foodAllergies, setFoodAllergies] = useState<string[]>([]);
@@ -483,13 +636,13 @@ function FormPageContent() {
 
   // Allergy options for children dropdown
   const childAllergyOptions = [
-    "Peanut",
-    "Milk",
     "Egg",
-    "Tree nuts",
-    "Soy",
     "Fish",
+    "Milk",
+    "Peanut",
     "Shellfish",
+    "Soy",
+    "Tree nuts",
     "Other",
   ];
 
@@ -497,16 +650,31 @@ function FormPageContent() {
   useEffect(() => {
     if (!getToken()) return; // fresh signup — nothing saved to prefill
 
-    setHasStoredToken(true);
     setLoadingProfile(true);
-    getMyProfile().then((profile: FetchedProfile | null) => {
+    getMyProfile().then((raw: FetchedProfile | null) => {
+      const profile = raw as MeProfile | null;
       if (!profile) {
+        // No profile (or fetch failed) — behave as a first-time registration.
+        setMode("new");
         setLoadingProfile(false);
         return;
       }
 
+      // Name/email are known even for a brand-new account.
       if (profile.firstName) setFirstName(profile.firstName);
       if (profile.lastName) setLastName(profile.lastName);
+      if (profile.email) setProfileEmail(profile.email);
+      if (profile.externalRefId) setExternalRefId(profile.externalRefId);
+
+      if (!hasSavedProfileData(profile)) {
+        // Registered but never filled the form — keep everything empty.
+        setMode("new");
+        setLoadingProfile(false);
+        return;
+      }
+
+      setMode("update");
+      setIsLocked(profile.active === false);
       if (profile.city) setCity(profile.city);
       if (profile.stateCode) {
         const stateName = resolveStateName(profile.stateCode);
@@ -535,19 +703,41 @@ function FormPageContent() {
       if (profile.children?.length) {
         setChildrenList(
           profile.children.map((c) => {
-            const label = c.allergies ? allergyReverseMap[c.allergies] : "";
-            const isKnown = !!label && label !== "Other";
+            // Saved as "PEANUT,MILK,SESAME": known codes become ticked
+            // options, anything else goes back into the "Other" textbox.
+            const codes = (c.allergies || "")
+              .split(",")
+              .map((a) => a.trim())
+              .filter((a) => a && a.toUpperCase() !== "OTHER");
+            const known: string[] = [];
+            const unknown: string[] = [];
+            codes.forEach((code) => {
+              const label = allergyReverseMap[code.toUpperCase()];
+              if (label && label !== "Other") known.push(label);
+              else unknown.push(code);
+            });
+            const hadOther =
+              unknown.length > 0 ||
+              (c.allergies || "").toUpperCase().split(",").includes("OTHER");
             return {
               age: c.age != null ? String(c.age) : "",
-              allergies: isKnown ? label : c.allergies ? "Other" : "",
-              allergiesOther: isKnown ? "" : c.allergies || "",
+              gender: resolveGender(c.gender),
+              allergies: hadOther ? [...known, "Other"] : known,
+              allergiesOther: unknown.join(", "),
             };
           }),
         );
       }
 
       const allergyMatch = matchOptions(profile.allergies, foodAllergyOptions);
-      setFoodAllergies(allergyMatch.selected);
+      // "No allergies" isn't stored — if Food was saved with no allergies,
+      // that's what the user picked last time.
+      setFoodAllergies(
+        allergyMatch.selected.length === 0 &&
+          profile.categories?.includes("FOOD")
+          ? ["No allergies"]
+          : allergyMatch.selected,
+      );
       setFoodAllergiesOther(allergyMatch.otherValue);
 
       // The backend stores grocery-store and pet-shop brands in one combined
@@ -570,7 +760,12 @@ function FormPageContent() {
         profile.healthConditions,
         healthConditionOptions,
       );
-      setHealthConditions(healthMatch.selected);
+      setHealthConditions(
+        healthMatch.selected.length === 0 &&
+          profile.categories?.includes("MEDICATIONS")
+          ? ["None"]
+          : healthMatch.selected,
+      );
       setHealthConditionsOther(healthMatch.otherValue);
 
       const sportsMatch = matchOptions(profile.sportsActivities, sportsOptions);
@@ -590,22 +785,30 @@ function FormPageContent() {
         );
       }
 
+      // Gender: prefer the top-level enum field from /me ("MALE"),
+      // fall back to the copy stored inside lifestyleNotes.
+      let notes: any = null;
       if (profile.lifestyleNotes) {
         try {
-          const notes = JSON.parse(profile.lifestyleNotes);
-          if (notes.gender) {
-            const genderMatch = matchSingle(notes.gender, genderOptions);
-            setGender(genderMatch.value);
-            setGenderOther(genderMatch.otherValue);
-          }
-          if (Array.isArray(notes.medications))
-            setMedications(notes.medications.join(", "));
-          if (Array.isArray(notes.medicalDevices))
-            setMedicalDevices(notes.medicalDevices.join(", "));
+          notes = JSON.parse(profile.lifestyleNotes);
         } catch (err) {
           console.error("Could not parse saved lifestyle notes:", err);
         }
       }
+      setGender(resolveGender(profile.gender || notes?.gender));
+
+      const meds = profile.medications?.length
+        ? profile.medications
+        : Array.isArray(notes?.medications)
+          ? notes.medications
+          : [];
+      if (meds.length) setMedications(meds.join(", "));
+      const devices = profile.medicalDevices?.length
+        ? profile.medicalDevices
+        : Array.isArray(notes?.medicalDevices)
+          ? notes.medicalDevices
+          : [];
+      if (devices.length) setMedicalDevices(devices.join(", "));
 
       setLoadingProfile(false);
     });
@@ -782,27 +985,18 @@ function FormPageContent() {
   // Children management functions
   const addChild = () => {
     if (childrenList.length < 5) {
-      setChildrenList([
-        ...childrenList,
-        { age: "", allergies: "", allergiesOther: "" },
-      ]);
+      setChildrenList([...childrenList, emptyChild()]);
     } else {
       alert("Maximum 5 children allowed.");
     }
   };
 
-  const updateChild = (
-    index: number,
-    updates: Partial<{
-      age: string;
-      allergies: string;
-      allergiesOther: string;
-    }>,
-  ) => {
-    const updated = [...childrenList];
-    updated[index] = { ...updated[index], ...updates };
-    setChildrenList(updated);
+  const updateChild = (index: number, updates: Partial<ChildForm>) => {
+    setChildrenList((list) =>
+      list.map((c, i) => (i === index ? { ...c, ...updates } : c)),
+    );
   };
+  const [showChildErrors, setShowChildErrors] = useState(false);
 
   const removeChild = (index: number) => {
     if (childrenList.length > 1) {
@@ -812,8 +1006,126 @@ function FormPageContent() {
     }
   };
 
+  // ========== CATEGORY SECTION VALIDATION ==========
+  // Every question inside a section that's opened by a selected recall
+  // category is mandatory. Errors are shown inline once the user has tried
+  // to submit, and update live as they fix them.
+  const [showSectionErrors, setShowSectionErrors] = useState(false);
+
+  // Toggle helper for groups with a "none" option ("No allergies", "None"):
+  // picking it clears the rest, picking anything else clears it.
+  const toggleWithNone =
+    (setter: React.Dispatch<React.SetStateAction<string[]>>, noneOpt: string) =>
+    (opt: string) =>
+      setter((prev) => {
+        if (prev.includes(opt)) return prev.filter((x) => x !== opt);
+        if (opt === noneOpt) return [noneOpt];
+        return [...prev.filter((x) => x !== noneOpt), opt];
+      });
+
+  const getSectionErrors = (): Record<string, string> => {
+    const errs: Record<string, string> = {};
+    const has = (label: string) => selectedCategories.includes(label);
+    const needOther = (sel: string[], other: string) =>
+      sel.includes("Other") && !other.trim();
+
+    const checkGroup = (
+      key: string,
+      sel: string[],
+      other: string,
+      emptyMsg: string,
+    ) => {
+      if (sel.length === 0) errs[key] = emptyMsg;
+      else if (needOther(sel, other))
+        errs[key] = 'Please specify your "Other" answer.';
+    };
+
+    if (has("Food (allergens, contaminations...)")) {
+      checkGroup(
+        "foodAllergies",
+        foodAllergies,
+        foodAllergiesOther,
+        'Please select your food allergies (or "No allergies").',
+      );
+      checkGroup(
+        "groceryStores",
+        groceryStores,
+        groceryStoresOther,
+        "Please select at least one grocery store.",
+      );
+    }
+
+    if (has("Automotive")) {
+      const filled = vehicles.filter((v) => v.make || v.model || v.year);
+      const maxYear = new Date().getFullYear() + 1;
+      const incomplete = filled.some(
+        (v) => !v.make.trim() || !v.model.trim() || !v.year.trim(),
+      );
+      const badYear = filled.some((v) => {
+        const y = parseInt(v.year);
+        return v.year.trim() !== "" && (isNaN(y) || y < 1900 || y > maxYear);
+      });
+      if (filled.length === 0)
+        errs.vehicles = "Please add at least one vehicle (make, model and year).";
+      else if (incomplete)
+        errs.vehicles = "Each vehicle needs a make, model and year.";
+      else if (badYear)
+        errs.vehicles = `Vehicle year must be between 1900 and ${maxYear}.`;
+    }
+
+    if (has("Pet products (food, toys...)")) {
+      checkGroup("pets", pets, petsOther, "Please select at least one pet.");
+      checkGroup(
+        "petShops",
+        petShops,
+        petShopsOther,
+        "Please select where you shop for your pet.",
+      );
+    }
+
+    if (has("Sports/Recreation")) {
+      checkGroup(
+        "sports",
+        sportsActivities,
+        sportsOther,
+        "Please select at least one activity.",
+      );
+    }
+
+    if (has("Clothes") || has("Cosmetics")) {
+      const filled = people.filter((p) => p.age || p.gender);
+      const incomplete = filled.some((p) => !p.age.trim() || !p.gender);
+      const badAge = filled.some((p) => {
+        const a = parseInt(p.age);
+        return p.age.trim() !== "" && (isNaN(a) || a < 0 || a > 120);
+      });
+      if (filled.length === 0)
+        errs.people = "Please add at least one person (age and gender).";
+      else if (incomplete) errs.people = "Each person needs an age and a gender.";
+      else if (badAge) errs.people = "Please enter a valid age (0–120).";
+    }
+
+    if (has("Medications, supplements, medical devices")) {
+      checkGroup(
+        "health",
+        healthConditions,
+        healthConditionsOther,
+        'Please select health conditions (or "None").',
+      );
+    }
+
+    return errs;
+  };
+
+  const sectionErrors = showSectionErrors ? getSectionErrors() : {};
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isLocked) {
+      router.push(SUBSCRIBE_PATH);
+      return;
+    }
+    if (isSubmitting || loadingProfile) return;
 
     if (!city || !state || !gender || !age) {
       alert("Please fill in all required basic fields.");
@@ -821,6 +1133,19 @@ function FormPageContent() {
     }
     if (selectedCategories.length === 0) {
       alert("Please select at least one recall category.");
+      return;
+    }
+
+    const errs = getSectionErrors();
+    const errKeys = Object.keys(errs);
+    if (errKeys.length > 0) {
+      setShowSectionErrors(true);
+      document
+        .getElementById(`section-${errKeys[0]}`)
+        ?.scrollIntoView({ behavior: "smooth", block: "start" });
+      alert(
+        "Please complete the highlighted questions for the recall categories you selected.",
+      );
       return;
     }
     if (!hasChildren) {
@@ -839,8 +1164,16 @@ function FormPageContent() {
       }
       for (let i = 0; i < childrenList.length; i++) {
         const child = childrenList[i];
-        if (child.age.trim() !== "" && isNaN(parseInt(child.age))) {
-          alert(`Child ${i + 1} age must be a number.`);
+        if (child.age.trim() === "") continue;
+        const a = parseInt(child.age);
+        if (isNaN(a) || a < 0 || a > 25) {
+          setShowChildErrors(true);
+          alert(`Please enter a valid age for child ${i + 1}.`);
+          return;
+        }
+        if (!child.gender) {
+          setShowChildErrors(true);
+          alert(`Please select a gender for child ${i + 1}.`);
           return;
         }
       }
@@ -893,7 +1226,7 @@ function FormPageContent() {
       return mapping[p] || "OTHER";
     };
 
-    const emailFromUrl = searchParams.get("email") || "";
+    const emailFromUrl = searchParams.get("email") || profileEmail || "";
     if (!emailFromUrl && !getToken()) {
       alert(
         "You're not signed in. Please go back and sign up or log in again.",
@@ -902,39 +1235,86 @@ function FormPageContent() {
     }
 
     const categories = selectedCategories.map(mapCategory);
-    const allergies = foodAllergies
-      .filter((a) => a !== "No allergies" && a !== "Other")
-      .map(mapAllergy);
-    const petsList = pets.map(mapPet);
-    const brands = [
-      ...groceryStores.filter((s) => s !== "Other").map((s) => s.toUpperCase()),
-      ...petShops.filter((s) => s !== "Other").map((s) => s.toUpperCase()),
-    ];
-    const health = healthConditions
-      .filter((c) => c !== "None")
-      .map((c) => c.toUpperCase());
 
-    // Build childrenArray for payload
-    const childrenArray = childrenList
+    // Only send data for sections that are actually active. Hidden sections
+    // keep their old state in memory (e.g. children entered before switching
+    // to "No", or allergies under a category that was deselected). Sending
+    // that stale state made updates look like they "didn't save" — the
+    // backend received the old children and kept hasChildren = true.
+    const wantsChildren = hasChildren === "Yes";
+    // "Other" free text → uppercase values, comma separated allowed
+    const splitOther = (text: string) =>
+      text
+        .split(",")
+        .map((t) => t.trim().toUpperCase())
+        .filter(Boolean);
+    const hasFood = selectedCategories.includes(
+      "Food (allergens, contaminations...)",
+    );
+    const hasPets = selectedCategories.includes("Pet products (food, toys...)");
+    const hasAutomotive = selectedCategories.includes("Automotive");
+    const hasSports = selectedCategories.includes("Sports/Recreation");
+    const hasMedical = selectedCategories.includes(
+      "Medications, supplements, medical devices",
+    );
+
+    const allergies = hasFood
+      ? foodAllergies
+          .filter((a) => a !== "No allergies" && a !== "Other")
+          .map(mapAllergy)
+      : [];
+    const petsList = hasPets ? pets.map(mapPet) : [];
+    const brands = [
+      ...(hasFood
+        ? groceryStores
+            .filter((s) => s !== "Other")
+            .map((s) => s.toUpperCase())
+        : []),
+      ...(hasFood && groceryStores.includes("Other")
+        ? splitOther(groceryStoresOther)
+        : []),
+      ...(hasPets
+        ? petShops.filter((s) => s !== "Other").map((s) => s.toUpperCase())
+        : []),
+      ...(hasPets && petShops.includes("Other")
+        ? splitOther(petShopsOther)
+        : []),
+    ];
+    const health = hasMedical
+      ? [
+          ...healthConditions
+            .filter((c) => c !== "None" && c !== "Other")
+            .map((c) => c.toUpperCase()),
+          ...(healthConditions.includes("Other")
+            ? splitOther(healthConditionsOther)
+            : []),
+        ]
+      : [];
+
+    // Build childrenArray for payload — empty when "No" is selected, so the
+    // backend removes previously saved children.
+    const childrenArray = (wantsChildren ? childrenList : [])
       .filter((child) => child.age.trim() !== "")
       .map((child) => {
-        let allergyValue: string | null = null;
-        if (child.allergies && child.allergies !== "") {
-          if (child.allergies === "Other") {
-            allergyValue = child.allergiesOther.trim()
-              ? child.allergiesOther.toUpperCase()
-              : "OTHER";
-          } else {
-            allergyValue = mapAllergy(child.allergies);
-          }
-        }
+        // Stored as one comma-separated string ("PEANUT,MILK,SESAME"); the
+        // matching engine already splits child allergies on commas.
+        const codes = [
+          ...child.allergies.filter((a) => a !== "Other").map(mapAllergy),
+          ...(child.allergies.includes("Other")
+            ? splitOther(child.allergiesOther).length
+              ? splitOther(child.allergiesOther)
+              : ["OTHER"]
+            : []),
+        ];
+        const unique = [...new Set(codes)];
         return {
           age: parseInt(child.age),
-          allergies: allergyValue,
+          gender: child.gender || null,
+          allergies: unique.length ? unique.join(",") : null,
         };
       });
 
-    const vehiclesArray = vehicles
+    const vehiclesArray = (hasAutomotive ? vehicles : [])
       .filter((v) => v.make || v.model || v.year)
       .map((v) => ({
         make: v.make,
@@ -942,15 +1322,17 @@ function FormPageContent() {
         year: v.year ? parseInt(v.year) : null,
       }));
 
-    const sports = sportsActivities
-      .filter((a) => a !== "Other")
-      .concat(sportsOther ? [sportsOther] : []);
+    const sports = hasSports
+      ? sportsActivities
+          .filter((a) => a !== "Other")
+          .concat(sportsOther ? [sportsOther] : [])
+      : [];
 
-    const medicationsArray = medications
+    const medicationsArray = (hasMedical ? medications : "")
       .split(",")
       .map((m) => m.trim())
       .filter((m) => m);
-    const medicalDevicesArray = medicalDevices
+    const medicalDevicesArray = (hasMedical ? medicalDevices : "")
       .split(",")
       .map((d) => d.trim())
       .filter((d) => d);
@@ -958,11 +1340,13 @@ function FormPageContent() {
     // Updated payload with lastName
     const userPayload = {
       email: emailFromUrl,
-      externalRefId: crypto.randomUUID?.() || Date.now().toString(),
+      // Keep the existing id on update; only generate one for a new registration.
+      externalRefId:
+        externalRefId || crypto.randomUUID?.() || Date.now().toString(),
       source: "API",
       age: age ? parseInt(age) : null,
-      firstName: firstName,
-      lastName: lastName.trim() || "", // Use actual lastName input
+      firstName: firstName.trim(),
+      lastName: lastName.trim(),
       city: city,
       stateCode: state.toUpperCase(),
       zipCode: zipCode || null,
@@ -975,24 +1359,56 @@ function FormPageContent() {
       vehicles: vehiclesArray,
       trackedUpcCodes: [],
       lifestyleNotes: null,
-      gender: gender === "Other" ? genderOther : gender,
+      // Always one of the backend Gender enum constants (uppercase).
+      // Free text typed under "Other" is NOT sent here — it would fail enum
+      // deserialization on the backend.
+      gender: toGenderEnum(gender) || null,
       sportsActivities: sports,
       medications: medicationsArray,
       medicalDevices: medicalDevicesArray,
-      hasChildren: hasChildren === "Yes",
+      hasChildren: wantsChildren,
     };
 
+    setIsSubmitting(true);
     try {
       const result = await updateMyProfile(userPayload);
       if (result.ok) {
-        alert("Preferences saved successfully!");
+        alert(
+          isUpdate
+            ? "Your profile has been updated."
+            : "Registration complete! Your preferences have been saved.",
+        );
+        // After a first-time save, the account now has data — any further
+        // visit to this page is an update.
+        setMode("update");
         router.push("/thank-you");
+      } else if (result.status === 402) {
+        // Backend: SubscriptionRequiredException → 402 Payment Required.
+        // Handled separately from 401/403 so the user is NOT logged out.
+        setIsLocked(true);
+        window.scrollTo({ top: 0, behavior: "smooth" });
+        alert(
+          result.message ||
+            "Your account is inactive. Choose a plan to reactivate it.",
+        );
+      } else if (result.status === 401 || result.status === 403) {
+        clearToken();
+        alert("Your session has expired. Please log in again.");
+        router.push(
+          `/auth${emailFromUrl ? `?email=${encodeURIComponent(emailFromUrl)}` : ""}`,
+        );
       } else {
-        alert(`Server error: ${result.message}`);
+        alert(
+          result.status >= 500
+            ? "We couldn't save your profile because of a problem on our side. Please try again in a few minutes. If it keeps happening, contact support."
+            : result.message,
+        );
       }
     } catch (err) {
       console.error(err);
       alert("Network error. Please try again.");
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -1024,8 +1440,25 @@ function FormPageContent() {
         <div className="max-w-4xl mx-auto">
           <div className="text-center mb-8">
             <div className="inline-flex items-center gap-2 bg-white/50 backdrop-blur-sm rounded-full px-4 py-1.5 text-blue-700 text-sm mb-4 border border-white/40">
-              🎉 {hasStoredToken ? "Welcome back" : "Welcome"}, {firstName}!
+              🎉 {isUpdate ? "Welcome back" : "Welcome"}, {firstName || "there"}!
             </div>
+            {isLocked && (
+              <div className="max-w-2xl mx-auto mb-4 text-left bg-amber-50 border border-amber-200 text-amber-800 rounded-xl p-4">
+                <p className="font-semibold">Your account is inactive</p>
+                <p className="text-sm mt-1">
+                  You can see your saved preferences below, but recall alerts
+                  are paused and changes can&apos;t be saved. Choose a plan to
+                  reactivate your account, or contact support.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => router.push(SUBSCRIBE_PATH)}
+                  className="mt-3 px-4 py-2 rounded-lg bg-amber-600 text-white text-sm font-semibold hover:bg-amber-700 transition"
+                >
+                  See plans
+                </button>
+              </div>
+            )}
             {loadingProfile && (
               <p className="text-blue-600 text-sm mb-2">
                 Loading your saved information…
@@ -1034,20 +1467,35 @@ function FormPageContent() {
             <h1 className="text-3xl md:text-4xl font-bold bg-gradient-to-r from-gray-900 to-blue-800 bg-clip-text text-transparent">
               Thank you for joining!
             </h1>
-            <p className="text-gray-600 mt-2 text-lg">
-              Continue below to get early access to{" "}
-              <strong>personalized</strong> product recall notifications.
-            </p>
-            <p className="text-gray-500 text-sm mt-1">
-              By providing a little more information, you'll receive recall
-              alerts that are relevant to you.
-            </p>
+            {isUpdate ? (
+              <p className="text-gray-600 mt-2 text-lg">
+                You can modify your selections below and we will update our
+                recall radar search for you.
+              </p>
+            ) : (
+              <>
+                <p className="text-gray-600 mt-2 text-lg">
+                  Continue below to get{" "}
+                  <strong>personalized</strong> product recall notifications.
+                </p>
+                <p className="text-gray-500 text-sm mt-1">
+                  By providing a little more information, you'll receive
+                  recall alerts that are relevant to you.
+                </p>
+              </>
+            )}
           </div>
 
           <form
             onSubmit={handleSubmit}
             className="glass-card p-8 rounded-2xl shadow-xl space-y-8"
           >
+            {/* A disabled <fieldset> makes every input inside read-only
+                when the subscription is inactive. */}
+            <fieldset
+              disabled={isLocked}
+              className={`space-y-8 min-w-0 border-0 p-0 m-0 ${isLocked ? "opacity-70" : ""}`}
+            >
             {/* TELL US ABOUT YOURSELF */}
             <div>
               <h2 className="text-2xl font-bold text-gray-800 mb-4">
@@ -1130,27 +1578,13 @@ function FormPageContent() {
                   <span className="text-red-500">*</span>
                 </label>
                 <RadioGroup
-                  options={[
-                    "MALE",
-                    "FEMALE",
-                    "TRANSGENDER",
-                    "NON_BINARY",
-                    "PREFER_NOT_TO_ANSWER",
-                    "OTHER",
-                  ]}
+                  name="gender"
+                  options={GENDER_OPTIONS}
                   value={gender}
-                  onChange={setGender}
+                  onChange={(v: string) => setGender(toGenderEnum(v))}
+                  getLabel={toGenderLabel}
                   label=""
                 />
-                {gender === "Other" && (
-                  <input
-                    type="text"
-                    value={genderOther}
-                    onChange={(e) => setGenderOther(e.target.value)}
-                    placeholder="Type your answer"
-                    className="mt-2 w-full px-4 py-2 rounded-xl bg-white/60 border border-gray-200 focus:border-blue-500 outline-none"
-                  />
-                )}
               </div>
               <div className="mt-4">
                 <label className="block text-gray-700 font-medium mb-1">
@@ -1195,54 +1629,22 @@ function FormPageContent() {
                   Food related preferences
                 </h3>
                 <CheckboxGroup
+                  id="section-foodAllergies"
+                  required
+                  error={sectionErrors.foodAllergies}
                   label="Do you have food allergies?"
-                  options={[
-                    "No allergies",
-                    "Milk",
-                    "Egg",
-                    "Peanut",
-                    "Tree nuts",
-                    "Soy",
-                    "Fish",
-                    "Shellfish",
-                    "Other",
-                  ]}
+                  options={["No allergies", ...foodAllergyOptions]}
                   selected={foodAllergies}
-                  onChange={(opt: string) =>
-                    setFoodAllergies((prev) =>
-                      prev.includes(opt)
-                        ? prev.filter((a) => a !== opt)
-                        : [...prev, opt],
-                    )
-                  }
+                  onChange={toggleWithNone(setFoodAllergies, "No allergies")}
                   otherValue={foodAllergiesOther}
                   setOtherValue={setFoodAllergiesOther}
                 />
                 <CheckboxGroup
+                  id="section-groceryStores"
+                  required
+                  error={sectionErrors.groceryStores}
                   label="Where do you typically shop for groceries?"
-                  options={[
-                    "ACME",
-                    "Publix",
-                    "Albertson's",
-                    "Sam's Club",
-                    "Amazon",
-                    "Safeway",
-                    "BJ's",
-                    "Save a Lot",
-                    "Costco",
-                    "Target",
-                    "Dollar Tree",
-                    "Trader Joe's",
-                    "Family Dollar",
-                    "Vonns",
-                    "Food Lion",
-                    "Walmart",
-                    "IGA",
-                    "Wegmans",
-                    "Kroger",
-                    "Whole Foods",
-                    "Other",
-                  ]}
+                  options={groceryStoreOptions}
                   selected={groceryStores}
                   onChange={(opt: string) =>
                     setGroceryStores((prev) =>
@@ -1258,54 +1660,72 @@ function FormPageContent() {
             )}
 
             {selectedCategories.includes("Automotive") && (
-              <div className="border-t pt-6">
-                <h3 className="text-xl font-bold text-gray-800 mb-4">
-                  Vehicle information
+              <div id="section-vehicles" className="border-t pt-6 scroll-mt-28">
+                <h3 className="text-xl font-bold text-gray-800 mb-2">
+                  Vehicle information <span className="text-red-500">*</span>
                 </h3>
+                <p className="text-xs text-gray-500 mb-3">
+                  Add at least one vehicle. Each vehicle you add needs a make,
+                  model and year.
+                </p>
+                <SectionError message={sectionErrors.vehicles} />
                 {vehicles.map((v, idx) => (
                   <div
                     key={idx}
-                    className="grid grid-cols-3 gap-3 mb-3 p-3 bg-white/30 rounded-xl"
+                    className="mb-3 p-3 bg-white/30 rounded-xl"
                   >
-                    <input
-                      type="text"
-                      placeholder={`Vehicle ${idx + 1} Make`}
-                      value={v.make}
-                      onChange={(e) =>
-                        setVehicles((prev) =>
-                          prev.map((veh, i) =>
-                            i === idx ? { ...veh, make: e.target.value } : veh,
-                          ),
-                        )
-                      }
-                      className="px-3 py-2 rounded-lg bg-white/60 border border-gray-200"
-                    />
-                    <input
-                      type="text"
-                      placeholder={`Vehicle ${idx + 1} Model`}
-                      value={v.model}
-                      onChange={(e) =>
-                        setVehicles((prev) =>
-                          prev.map((veh, i) =>
-                            i === idx ? { ...veh, model: e.target.value } : veh,
-                          ),
-                        )
-                      }
-                      className="px-3 py-2 rounded-lg bg-white/60 border border-gray-200"
-                    />
-                    <input
-                      type="text"
-                      placeholder={`Vehicle ${idx + 1} Year`}
-                      value={v.year}
-                      onChange={(e) =>
-                        setVehicles((prev) =>
-                          prev.map((veh, i) =>
-                            i === idx ? { ...veh, year: e.target.value } : veh,
-                          ),
-                        )
-                      }
-                      className="px-3 py-2 rounded-lg bg-white/60 border border-gray-200"
-                    />
+                    {/* The vehicle number is a label above the row, so each
+                        box only needs "Make" / "Model" / "Year" and stays
+                        readable on narrow phone screens. */}
+                    <p className="text-sm font-semibold text-gray-700 mb-2">
+                      Vehicle {idx + 1}
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                      <input
+                        type="text"
+                        aria-label={`Vehicle ${idx + 1} make`}
+                        placeholder="Make (e.g. Toyota)"
+                        value={v.make}
+                        onChange={(e) =>
+                          setVehicles((prev) =>
+                            prev.map((veh, i) =>
+                              i === idx ? { ...veh, make: e.target.value } : veh,
+                            ),
+                          )
+                        }
+                        className="w-full min-w-0 px-3 py-2 rounded-lg bg-white/60 border border-gray-200"
+                      />
+                      <input
+                        type="text"
+                        aria-label={`Vehicle ${idx + 1} model`}
+                        placeholder="Model (e.g. Camry)"
+                        value={v.model}
+                        onChange={(e) =>
+                          setVehicles((prev) =>
+                            prev.map((veh, i) =>
+                              i === idx ? { ...veh, model: e.target.value } : veh,
+                            ),
+                          )
+                        }
+                        className="w-full min-w-0 px-3 py-2 rounded-lg bg-white/60 border border-gray-200"
+                      />
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        maxLength={4}
+                        aria-label={`Vehicle ${idx + 1} year`}
+                        placeholder="Year (e.g. 2020)"
+                        value={v.year}
+                        onChange={(e) =>
+                          setVehicles((prev) =>
+                            prev.map((veh, i) =>
+                              i === idx ? { ...veh, year: e.target.value } : veh,
+                            ),
+                          )
+                        }
+                        className="w-full min-w-0 px-3 py-2 rounded-lg bg-white/60 border border-gray-200"
+                      />
+                    </div>
                   </div>
                 ))}
               </div>
@@ -1317,17 +1737,11 @@ function FormPageContent() {
                   Pet information
                 </h3>
                 <CheckboxGroup
+                  id="section-pets"
+                  required
+                  error={sectionErrors.pets}
                   label="What pets do you have?"
-                  options={[
-                    "Dog",
-                    "Cat",
-                    "Bird",
-                    "Fish",
-                    "Rabbit",
-                    "Hamster",
-                    "Snake",
-                    "Other",
-                  ]}
+                  options={petOptions}
                   selected={pets}
                   onChange={(opt: string) =>
                     setPets((prev) =>
@@ -1340,16 +1754,11 @@ function FormPageContent() {
                   setOtherValue={setPetsOther}
                 />
                 <CheckboxGroup
+                  id="section-petShops"
+                  required
+                  error={sectionErrors.petShops}
                   label="Where do you shop for your pet?"
-                  options={[
-                    "Petsmart",
-                    "Pet Supermarket",
-                    "Petco",
-                    "Pet Supplies Plus",
-                    "Amazon",
-                    "Walmart",
-                    "Other",
-                  ]}
+                  options={petShopOptions}
                   selected={petShops}
                   onChange={(opt: string) =>
                     setPetShops((prev) =>
@@ -1370,24 +1779,11 @@ function FormPageContent() {
                   Sports & recreation
                 </h3>
                 <CheckboxGroup
+                  id="section-sports"
+                  required
+                  error={sectionErrors.sports}
                   label="What sports/recreational activities do you enjoy?"
-                  options={[
-                    "Basketball",
-                    "Arts and Crafts",
-                    "Baseball",
-                    "Gardening",
-                    "Biking/Cycling",
-                    "Woodworking",
-                    "Soccer",
-                    "Running",
-                    "Football",
-                    "Traveling",
-                    "Fishing",
-                    "Cars",
-                    "Snow sports (skiing, snowboarding)",
-                    "Recreational vehicles (ATVs, 4 wheelers)",
-                    "Other",
-                  ]}
+                  options={sportsOptions}
                   selected={sportsActivities}
                   onChange={(opt: string) =>
                     setSportsActivities((prev) =>
@@ -1404,11 +1800,16 @@ function FormPageContent() {
 
             {(selectedCategories.includes("Clothes") ||
               selectedCategories.includes("Cosmetics")) && (
-              <div className="border-t pt-6">
-                <h3 className="text-xl font-bold text-gray-800 mb-4">
+              <div id="section-people" className="border-t pt-6 scroll-mt-28">
+                <h3 className="text-xl font-bold text-gray-800 mb-2">
                   Who are we monitoring clothes or cosmetics recalls for?{" "}
                   <span className="text-red-500">*</span>
                 </h3>
+                <p className="text-xs text-gray-500 mb-3">
+                  Add at least one person. Each person you add needs an age and
+                  a gender.
+                </p>
+                <SectionError message={sectionErrors.people} />
                 {people.map((person, idx) => (
                   <div
                     key={idx}
@@ -1432,17 +1833,20 @@ function FormPageContent() {
                       onChange={(e) =>
                         setPeople((prev) =>
                           prev.map((p, i) =>
-                            i === idx ? { ...p, gender: e.target.value } : p,
+                            i === idx
+                              ? { ...p, gender: toGenderEnum(e.target.value) }
+                              : p,
                           ),
                         )
                       }
                       className="px-3 py-2 rounded-lg bg-white/60 border border-gray-200"
                     >
                       <option value="">Gender</option>
-                      <option>Male</option>
-                      <option>Female</option>
-                      <option>Non-binary</option>
-                      <option>Transgender</option>
+                      {GENDER_OPTIONS.map((g) => (
+                        <option key={g} value={g}>
+                          {toGenderLabel(g)}
+                        </option>
+                      ))}
                     </select>
                   </div>
                 ))}
@@ -1457,27 +1861,13 @@ function FormPageContent() {
                   Health & medical information
                 </h3>
                 <CheckboxGroup
+                  id="section-health"
+                  required
+                  error={sectionErrors.health}
                   label="Does anyone in your household have health conditions?"
-                  options={[
-                    "None",
-                    "Kidney disease",
-                    "Heart disease",
-                    "Obesity",
-                    "Diabetes",
-                    "Stroke",
-                    "Dementia",
-                    "Cancer",
-                    "Lung disease",
-                    "Other",
-                  ]}
+                  options={["None", ...healthConditionOptions]}
                   selected={healthConditions}
-                  onChange={(opt: string) =>
-                    setHealthConditions((prev) =>
-                      prev.includes(opt)
-                        ? prev.filter((c) => c !== opt)
-                        : [...prev, opt],
-                    )
-                  }
+                  onChange={toggleWithNone(setHealthConditions, "None")}
                   otherValue={healthConditionsOther}
                   setOtherValue={setHealthConditionsOther}
                 />
@@ -1516,6 +1906,7 @@ function FormPageContent() {
                 Do you have children? <span className="text-red-500">*</span>
               </h2>
               <RadioGroup
+                name="hasChildren"
                 options={["Yes", "No"]}
                 value={hasChildren}
                 onChange={setHasChildren}
@@ -1538,6 +1929,7 @@ function FormPageContent() {
                     removeChild={removeChild}
                     canRemove={childrenList.length > 1}
                     allergyOptions={childAllergyOptions}
+                    showErrors={showChildErrors}
                   />
                 ))}
                 <button
@@ -1548,16 +1940,29 @@ function FormPageContent() {
                   + Add another child
                 </button>
                 <p className="text-xs text-gray-500 mt-2">
-                  At least one child must have an age entered.
+                  Enter an age and gender for each child.
                 </p>
               </div>
             )}
 
+            </fieldset>
+
             <button
               type="submit"
-              className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-semibold py-4 rounded-xl shadow-md hover:shadow-lg transform hover:-translate-y-0.5 transition duration-200 text-lg"
+              disabled={isSubmitting || loadingProfile}
+              className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 text-white font-semibold py-4 rounded-xl shadow-md hover:shadow-lg transform hover:-translate-y-0.5 transition duration-200 text-lg disabled:opacity-60 disabled:cursor-not-allowed disabled:hover:translate-y-0"
             >
-              Register →
+              {loadingProfile
+                ? "Loading your data…"
+                : isLocked
+                  ? "See plans to reactivate"
+                  : isSubmitting
+                  ? isUpdate
+                    ? "Updating your profile…"
+                    : "Registering…"
+                  : isUpdate
+                    ? "Update my profile"
+                    : "Register"}
             </button>
           </form>
         </div>

@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { resetPassword } from "@/lib/auth";
+import PasswordInput from "./PasswordInput";
 
 export default function ResetPasswordForm({
   token,
@@ -49,19 +50,19 @@ export default function ResetPasswordForm({
       <p className="text-sm text-gray-500 text-center">
         Choose a new password for your account.
       </p>
-      <input
-        type="password"
+      <PasswordInput
         placeholder="New password"
         value={newPassword}
         onChange={(e) => setNewPassword(e.target.value)}
         className="w-full px-4 py-3 rounded-xl bg-white/60 border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none transition"
+        autoComplete="new-password"
       />
-      <input
-        type="password"
+      <PasswordInput
         placeholder="Confirm new password"
         value={confirmPassword}
         onChange={(e) => setConfirmPassword(e.target.value)}
         className="w-full px-4 py-3 rounded-xl bg-white/60 border border-gray-200 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 outline-none transition"
+        autoComplete="new-password"
       />
       {error && <p className="text-red-500 text-sm text-center">{error}</p>}
       <button

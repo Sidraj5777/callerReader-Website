@@ -24,7 +24,8 @@ export interface AuthResponse {
 
 type AuthResult =
   | { ok: true; data: AuthResponse }
-  | { ok: false; status: number; message: string };
+  // `code` is a machine-readable reason from the backend, e.g. "INVALID_EMAIL".
+  | { ok: false; status: number; message: string; code?: string };
 
 async function postAuth(path: string, body: unknown): Promise<AuthResult> {
   try {
@@ -41,6 +42,7 @@ async function postAuth(path: string, body: unknown): Promise<AuthResult> {
         ok: false,
         status: res.status,
         message: data.message || "Something went wrong. Please try again.",
+        code: typeof data.code === "string" ? data.code : undefined,
       };
     }
 
@@ -55,6 +57,7 @@ export const registerUser = (data: {
   firstName: string;
   lastName: string;
   email: string;
+  confirmEmail: string; // same email typed again; the backend checks they match
   password: string;
 }) => postAuth("register", data);
 
@@ -116,7 +119,7 @@ export async function resetPassword(data: {
   }
 }
 
-async function authFetch(path: string, options: RequestInit = {}) {
+export async function authFetch(path: string, options: RequestInit = {}) {
   const token = getToken();
   return fetch(`${API_BASE_URL}${path}`, {
     ...options,
@@ -143,7 +146,7 @@ export interface FetchedProfile {
   allergies?: string[];
   pets?: string[];
   healthConditions?: string[];
-  children?: { age: number; allergies: string | null }[];
+  children?: { age: number; gender?: string | null; allergies: string | null }[];
   vehicles?: { make: string; model: string; year: number | null }[];
   sportsActivities?: string[];
 }
@@ -177,11 +180,36 @@ export async function updateMyProfile(payload: Record<string, unknown>): Promise
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      return { ok: false, status: res.status, message: data.message || "Could not save your profile." };
+      return {
+        ok: false,
+        status: res.status,
+        message: data.message || data.error || "Could not save your profile.",
+      };
     }
     return { ok: true, data: data as FetchedProfile };
   } catch (err) {
     console.error(err);
     return { ok: false, status: 0, message: "Network error. Please try again." };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Google sign-in
+// The browser gets a Google ID token (credential) from Google Identity
+// Services and sends it here. The backend verifies it with Google, finds or
+// creates the user by email, and returns the same JWT response as /login.
+// See backend-changes/GoogleAuthController.java.
+// ---------------------------------------------------------------------------
+
+export interface GoogleAuthResponse extends AuthResponse {
+  email?: string;
+  firstName?: string;
+  lastName?: string;
+  newUser?: boolean;
+}
+
+export async function loginWithGoogle(credential: string) {
+  const result = await postAuth("google", { credential });
+  if (!result.ok) return result;
+  return { ok: true as const, data: result.data as GoogleAuthResponse };
 }

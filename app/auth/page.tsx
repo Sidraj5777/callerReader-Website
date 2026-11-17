@@ -5,12 +5,19 @@ import { useRouter, useSearchParams } from "next/navigation";
 import LoginForm from "@/components/auth/LoginForm";
 import SignupForm from "@/components/auth/SignupForm";
 import ForgotPasswordForm from "@/components/auth/ForgotPasswordForm";
+import GoogleSignInButton, { type GoogleSignInResult } from "@/components/auth/GoogleSignInButton";
 
 function AuthPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [tab, setTab] = useState<"login" | "signup" | "forgot">("signup");
+  const [tab, setTab] = useState<"login" | "signup" | "forgot">(
+    searchParams.get("next") ? "login" : "signup",
+  );
   const [existingEmail, setExistingEmail] = useState<string | undefined>();
+
+  // Only allow same-site paths like "/subscribe" (never full URLs).
+  const rawNext = searchParams.get("next") || "";
+  const next = rawNext.startsWith("/") && !rawNext.startsWith("//") ? rawNext : "";
 
   const prefill = {
     firstName: searchParams.get("firstName") || undefined,
@@ -24,6 +31,13 @@ function AuthPageContent() {
         lastName,
       )}&email=${encodeURIComponent(email)}`,
     );
+  };
+
+  // Google sign-in: same destination as email signup/login.
+  const handleGoogle = (r: GoogleSignInResult) => {
+    if (next && !r.newUser) router.push(next);
+    else if (r.firstName || r.lastName) goToForm(r.firstName, r.lastName, r.email);
+    else router.push(`/form?email=${encodeURIComponent(r.email)}`);
   };
 
   return (
@@ -73,6 +87,7 @@ function AuthPageContent() {
               }}
               onSuccess={goToForm}
             />
+            <GoogleSignInButton text="signup_with" onSuccess={handleGoogle} />
           </>
         ) : tab === "forgot" ? (
           <ForgotPasswordForm
@@ -80,15 +95,18 @@ function AuthPageContent() {
             onBackToLogin={() => setTab("login")}
           />
         ) : (
+          <>
           <LoginForm
             prefillEmail={existingEmail || prefill.email}
             onSuccess={(email) => {
               // No firstName/lastName back from login yet — /form will default to
               // "there" until the profile-fetch step exists.
-              router.push(`/form?email=${encodeURIComponent(email)}`);
+              router.push(next || `/form?email=${encodeURIComponent(email)}`);
             }}
             onForgotPassword={() => setTab("forgot")}
           />
+          <GoogleSignInButton text="signin_with" onSuccess={handleGoogle} />
+          </>
         )}
       </div>
     </div>

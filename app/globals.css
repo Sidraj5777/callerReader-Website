@@ -87,3 +87,86 @@ body {
   border-color: rgba(59, 130, 246, 0.3);
   box-shadow: 0 25px 35px -12px rgba(0, 0, 0, 0.12);
 }
+/* ------------------------------------------------------------------ */
+/* Additions — marketing pages (radar hero, anchors, article prose)    */
+/* ------------------------------------------------------------------ */
+
+html {
+  scroll-behavior: smooth;
+}
+[id] {
+  scroll-margin-top: 6rem;
+}
+
+:focus-visible {
+  outline: 2px solid #2563eb;
+  outline-offset: 3px;
+}
+
+.radar-sweep {
+  background: conic-gradient(from 0deg, rgba(96, 165, 250, 0.45), rgba(96, 165, 250, 0) 70deg, transparent 360deg);
+  animation: radar-spin 4s linear infinite;
+}
+@keyframes radar-spin {
+  to { transform: rotate(360deg); }
+}
+.radar-blip {
+  animation: radar-blip 4s ease-out infinite;
+}
+@keyframes radar-blip {
+  0%, 100% { opacity: 0.55; transform: scale(1); }
+  8% { opacity: 1; transform: scale(1.5); }
+  30% { opacity: 0.85; transform: scale(1); }
+}
+.radar-blip-alert {
+  box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.7);
+  animation: radar-alert 2s ease-out infinite;
+}
+@keyframes radar-alert {
+  0% { box-shadow: 0 0 0 0 rgba(251, 191, 36, 0.7); }
+  100% { box-shadow: 0 0 0 14px rgba(251, 191, 36, 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .radar-sweep,
+  .radar-blip,
+  .radar-blip-alert {
+    animation: none;
+  }
+  .radar-sweep { transform: rotate(35deg); }
+}
+
+/* Long-form article text (blog posts, legal pages) */
+.prose-rr {
+  color: #374151;
+  font-size: 1.0625rem;
+  line-height: 1.8;
+}
+.prose-rr > * + * { margin-top: 1.15em; }
+.prose-rr h2 {
+  margin-top: 2.2em;
+  font-size: 1.6rem;
+  line-height: 1.3;
+  font-weight: 800;
+  color: #111827;
+  letter-spacing: -0.01em;
+}
+.prose-rr h3 {
+  margin-top: 1.8em;
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: #111827;
+}
+.prose-rr ul,
+.prose-rr ol { padding-left: 1.4em; }
+.prose-rr ul { list-style: disc; }
+.prose-rr ol { list-style: decimal; }
+.prose-rr li + li { margin-top: 0.45em; }
+.prose-rr li::marker { color: #2563eb; }
+.prose-rr a {
+  color: #1d4ed8;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.prose-rr strong { color: #111827; }
